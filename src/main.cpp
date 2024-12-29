@@ -52,7 +52,7 @@ namespace
         {
             fprintf(stderr, "Failed to initialize GLFW. Are you on a server and running this with X forwarding?\n");
             fprintf(stderr, "Make sure you connect to your ssh session with the -X flag (the -v flag for debugging can be useful also)\n");
-            fprintf(stderr, "If you are running this on a remote server, make sure you have mesa-utils installed\n");
+            fprintf(stderr, "If you are running this on a remote server, and have mesa-utils installed, check with glxgears \n");
             return false;
         }
 
@@ -66,8 +66,7 @@ namespace
 
         if (!window)
         {
-            fprintf(stderr, "Failed to create window, check if mesa-utils is installed\n");
-            fprintf(stderr, "Use, glxinfo or glxgears to check if mesa-utils is installed\n");
+            fprintf(stderr, "Failed to create window, check debug output\n");
 
             glfwTerminate();
             return false;

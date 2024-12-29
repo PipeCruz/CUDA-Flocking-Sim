@@ -1,4 +1,4 @@
-# CS179 Flocking Simulator
+# CUDA Flocking Simulator
 
 
 ## Usage Instructions
@@ -8,15 +8,9 @@ There's a few libraries that are needed as seen in the Makefile.
 
  `-lglfw -lGL -lGLU -lGLEW -lcudart`
 
-To my knowledge, the program compiles fine. The issue is that mesa-utils is missing from `titan` which we need for a program called GLX that allows us to render an OpenGL instance remotely to our local machine.
+To run locally you just need to find out how to install `libglfw3, GLEW, GLFW` on top of a regular cuda dev environment.
 
-We'll need to connect with the `-X` flag, i.e. `ssh -X <name>@titan.caltech.edu`, to let us create a window.
-
-Install `mesa-utils` with `$ apt install mesa-utils` and test it with `$ glxgears`
-
-Alternatively, to run locally you just need to find out how to install `libglfw3, GLEW, GLFW` on top of a regular cuda dev environment.
-
-To run this project, run `make crun`, and  change any of the constant parameters in `config.h`. You'll want to focus on scaling factors, distances, and quantity of particles to see different behaviors. Run with `USECPU = false` and `SIMTYPE = 2` to see the fastest / best frame rate algorithm. The default `NUM_BOIDS` argument is best suited for the GPU, anything over a thousand has significant performance issues, or it did on my machine. 
+To run this project, run `make crun` or `make clean run`, and  change any of the constant parameters in `config.h`. You'll want to focus on scaling factors, distances, and quantity of particles to see different behaviors. Run with `USECPU = false` and `SIMTYPE = 2` to see the fastest / best frame rate algorithm. The default `NUM_BOIDS` argument is best suited for the GPU, anything over a thousand has significant performance issues, or it did on my machine. 
 
 
 ## Project Description
@@ -31,7 +25,7 @@ What does the program do?
 		3. You can change the parameters in the `config.h` file  to your liking and see how the particle's behaviors changes
 		4. You can use your mouse to rotate around the projected visualization of the flocking sim.
     In our original planning, we thought we'd be doing more graphics stuff but just rendering the particles as points colored by the magnitude of their velocity gets the point across.
-    NOTE: all the GPU rendering was done on a laptop GTX 1050Ti.
+    NOTE: all the GPU rendering was done on a laptop with a GTX 1050ti, Ubuntu 22.05.5 LTS x86_64, and  Intel i7-8750H (12) @ 4.1GHz.
     
 ## Results
 What should we expect to see?
@@ -64,12 +58,3 @@ Furtheremore, we can see
 For 1 million boids on the gpu:pictured here about 15 secs after starting, we see it's at a low fps, but still three times faster, around 15fps ![1 mil fps](1mil_gpu_fps.png)
 
 As context, 10k on the cpu using the grid flattening method: ![10k cpu grid flat](10k_cpu_fps.png) hovers around half the fps of the CUDA 100k simulation, despite having 10 times less particles to match.
-
-
-
-## Implications
-
-Just by running this program, it's clear that using a GPU to accelerate the simulation is highly effective and clear why something like this would be useful for simulating swarms.
-
-
-

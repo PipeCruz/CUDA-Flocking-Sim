@@ -114,39 +114,47 @@ namespace CPUSim
 
     void runVanillaSim(std::shared_ptr<STDBoids> &boids, double dt, GLuint &bPosVBO, GLuint &bVelVBO)
     {
-        glm::vec3 dV;
-        // std::cout << "running cpu sim" << std::endl;
-        for (size_t i = 0; i < boids->boidPositions.size(); ++i)
+        size_t numBoids = boids->boidPositions.size();
+        std::vector<glm::vec4> newVelocities(numBoids);
+        std::vector<glm::vec4> newPositions(numBoids);
+
+        for (size_t i = 0; i < numBoids; ++i)
         {
-            dV = computeNaiveBehavior(boids, i);
+            glm::vec3 dV = computeNaiveBehavior(boids, i);
 
-            // Update velocity and limit it
-            boids->boidVelocities[i] += glm::vec4(dV, 0.0f);
+            glm::vec3 updatedVelocity = glm::vec3(boids->boidVelocities[i]) + dV;
+            updatedVelocity = limit(updatedVelocity, MAX_SPEED);
+            newVelocities[i] = glm::vec4(updatedVelocity, 0.0f);
 
-            // Update position
-            boids->boidPositions[i] += boids->boidVelocities[i] * static_cast<float>(dt);
+            glm::vec3 updatedPosition = glm::vec3(boids->boidPositions[i]) + updatedVelocity * static_cast<float>(dt);
+            newPositions[i] = glm::vec4(updatedPosition, 1.0f);
 
-            boids->boidVelocities[i] = glm::vec4(limit(glm::vec3(boids->boidVelocities[i]), MAX_SPEED), 0.0f);
-
-            // BOUND the position
-            boundPosition(boids->boidPositions[i]);
+            boundPosition(newPositions[i]);
         }
 
-        std::vector<glm::vec4> boidPositions(NUM_BOIDS);
-        for (size_t i = 0; i < boids->boidVelocities.size(); ++i)
+        // Apply updates to the boids
+        for (size_t i = 0; i < numBoids; ++i)
+        {
+            boids->boidVelocities[i] = newVelocities[i];
+            boids->boidPositions[i] = newPositions[i];
+        }
+
+        // Scale positions for rendering
+        std::vector<glm::vec4> boidPositions(numBoids);
+        for (size_t i = 0; i < numBoids; ++i)
         {
             boidPositions[i] = boids->boidPositions[i] * static_cast<float>(1.0f / SCALING);
         }
+
         // Update VBOs
         glBindBuffer(GL_ARRAY_BUFFER, bPosVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, NUM_BOIDS * sizeof(glm::vec4), boidPositions.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, numBoids * sizeof(glm::vec4), boidPositions.data());
 
         glBindBuffer(GL_ARRAY_BUFFER, bVelVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, NUM_BOIDS * sizeof(glm::vec4), boids->boidVelocities.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, numBoids * sizeof(glm::vec4), boids->boidVelocities.data());
     }
 
     // GRID SIM
-    // FIXME make into kwarg
 
     const int CUBE_INT = (GRID_SIZE * GRID_SIZE * GRID_SIZE);
 
@@ -159,7 +167,6 @@ namespace CPUSim
 
         int index = x * GRID_SIZE * GRID_SIZE + y * GRID_SIZE + z;
 
-        // std::cout << "index: " << index << std::endl;
         return index;
     }
 
@@ -170,7 +177,6 @@ namespace CPUSim
         for (size_t i = 0; i < NUM_BOIDS; ++i)
         {
             int index = computeGridIndex(glm::vec3(boids->boidPositions[i]));
-            // std::cout << "index: " << index << std::endl;
             grid[index].push_back(i);
         }
 
@@ -244,38 +250,48 @@ namespace CPUSim
 
     void runGridSim(std::shared_ptr<STDBoids> &boids, double dt, GLuint &bPosVBO, GLuint &bVelVBO)
     {
-        glm::vec3 dV;
+        size_t numBoids = boids->boidPositions.size();
+        std::vector<glm::vec4> newVelocities(numBoids);
+        std::vector<glm::vec4> newPositions(numBoids);
+
         std::array<std::vector<size_t>, GRID_SIZE * GRID_SIZE * GRID_SIZE> grid = gridHashing(boids);
 
-        for (size_t i = 0; i < boids->boidPositions.size(); ++i)
+        // Compute new velocities and positions
+        for (size_t i = 0; i < numBoids; ++i)
         {
-            dV = computeGridBehavior(boids, i, grid);
+            glm::vec3 dV = computeGridBehavior(boids, i, grid);
 
-            // Update velocity
-            boids->boidVelocities[i] += glm::vec4(dV, 0.0f);
-            // limit velocity
-            boids->boidVelocities[i] = glm::vec4(limit(glm::vec3(boids->boidVelocities[i]), MAX_SPEED), 0.0f);
+            // Update velocity and limit it
+            glm::vec3 updatedVelocity = glm::vec3(boids->boidVelocities[i]) + dV;
+            updatedVelocity = limit(updatedVelocity, MAX_SPEED);
+            newVelocities[i] = glm::vec4(updatedVelocity, 0.0f);
 
-            // Update position
-            boids->boidPositions[i] += boids->boidVelocities[i] * static_cast<float>(dt);
+            // Calculate new position
+            glm::vec3 updatedPosition = glm::vec3(boids->boidPositions[i]) + updatedVelocity * static_cast<float>(dt);
+            newPositions[i] = glm::vec4(updatedPosition, 1.0f);
 
-            // BOUND the position
-            boundPosition(boids->boidPositions[i]);
+            // Bound the position
+            boundPosition(newPositions[i]);
         }
 
-        std::vector<glm::vec4> boidPos(NUM_BOIDS);
-        for (size_t i = 0; i < boids->boidVelocities.size(); ++i)
+        for (size_t i = 0; i < numBoids; ++i)
         {
-            boidPos[i] = boids->boidPositions[i] * static_cast<float>(1.0f / SCALING);
+            boids->boidVelocities[i] = newVelocities[i];
+            boids->boidPositions[i] = newPositions[i];
         }
-        // Update VBOs
+
+        std::vector<glm::vec4> boidPositions(numBoids);
+        for (size_t i = 0; i < numBoids; ++i)
+        {
+            boidPositions[i] = boids->boidPositions[i] * static_cast<float>(1.0f / SCALING);
+        }
+
         glBindBuffer(GL_ARRAY_BUFFER, bPosVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, boids->boidPositions.size() * sizeof(glm::vec4), boidPos.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, numBoids * sizeof(glm::vec4), boidPositions.data());
 
         glBindBuffer(GL_ARRAY_BUFFER, bVelVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, boids->boidVelocities.size() * sizeof(glm::vec4), boids->boidVelocities.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, numBoids * sizeof(glm::vec4), boids->boidVelocities.data());
     }
-
     // SPATIAL HASHING
 
     int hashFunction(const glm::vec3 &pos)
@@ -371,33 +387,51 @@ namespace CPUSim
 
     void runSpatialHashingSim(std::shared_ptr<STDBoids> &boids, double dt, GLuint &bPosVBO, GLuint &bVelVBO)
     {
-        glm::vec3 dV;
+        size_t numBoids = boids->boidPositions.size();
+        std::vector<glm::vec4> newVelocities(numBoids);
+        std::vector<glm::vec4> newPositions(numBoids);
+
+        // Compute the spatial hash table
         std::unordered_map<int, std::vector<size_t>> hashTable = spatialHashing(boids);
 
-        for (size_t i = 0; i < boids->boidPositions.size(); ++i)
+        // Compute new velocities and positions
+        for (size_t i = 0; i < numBoids; ++i)
         {
+            glm::vec3 dV = computeSpatialHashingBehavior(boids, i, hashTable);
 
-            dV = computeSpatialHashingBehavior(boids, i, hashTable);
+            // Update velocity and limit it
+            glm::vec3 updatedVelocity = glm::vec3(boids->boidVelocities[i]) + dV;
+            updatedVelocity = limit(updatedVelocity, MAX_SPEED);
+            newVelocities[i] = glm::vec4(updatedVelocity, 0.0f);
 
-            boids->boidVelocities[i] += glm::vec4(dV, 0.0f);
-            boids->boidVelocities[i] = glm::vec4(limit(glm::vec3(boids->boidVelocities[i]), MAX_SPEED), 0.0f);
+            // Calculate new position
+            glm::vec3 updatedPosition = glm::vec3(boids->boidPositions[i]) + updatedVelocity * static_cast<float>(dt);
+            newPositions[i] = glm::vec4(updatedPosition, 1.0f);
 
-            boids->boidPositions[i] += boids->boidVelocities[i] * static_cast<float>(dt);
-
-            boundPosition(boids->boidPositions[i]);
+            // Bound the position
+            boundPosition(newPositions[i]);
         }
 
-        // scale velocity by SCALING to render
-        std::vector<glm::vec4> boidPos(NUM_BOIDS);
-        for (size_t i = 0; i < boids->boidVelocities.size(); ++i)
+        // Apply updates to the boids
+        for (size_t i = 0; i < numBoids; ++i)
         {
-            boidPos[i] = boids->boidPositions[i] * static_cast<float>(1.0f / SCALING);
+            boids->boidVelocities[i] = newVelocities[i];
+            boids->boidPositions[i] = newPositions[i];
         }
+
+        // Scale positions for rendering
+        std::vector<glm::vec4> boidPositions(numBoids);
+        for (size_t i = 0; i < numBoids; ++i)
+        {
+            boidPositions[i] = boids->boidPositions[i] * static_cast<float>(1.0f / SCALING);
+        }
+
         // Update VBOs
         glBindBuffer(GL_ARRAY_BUFFER, bPosVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, boids->boidPositions.size() * sizeof(glm::vec4), boidPos.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, numBoids * sizeof(glm::vec4), boidPositions.data());
 
         glBindBuffer(GL_ARRAY_BUFFER, bVelVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, boids->boidVelocities.size() * sizeof(glm::vec4), boids->boidVelocities.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, numBoids * sizeof(glm::vec4), boids->boidVelocities.data());
     }
-} 
+    
+}
