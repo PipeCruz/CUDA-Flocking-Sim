@@ -1,6 +1,7 @@
 # CUDA Flocking Simulator
 
-This was my final project for CS179 @ Caltech. Code was thrown together within a few days.
+This was my final project for CS179 @ Caltech. No starter code, did everything from scratch. I threw this together in a few days so there might be some bugs, I'll fix it sometime (maybe).
+
 <!-- code block -->
 ## Installation 
 There's a few libraries that are needed as seen in the Makefile.
