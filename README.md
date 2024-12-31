@@ -1,6 +1,6 @@
 # CUDA Flocking Simulator
 
-This was my final project for CS179 @ Caltech. No starter code, did everything from scratch. I threw this together in a few days so there might be some bugs, I'll fix it sometime (maybe).
+My final project for CS179 @ Caltech. This was built entirely from scratch, I had no prior experience with OpenGL beforehand.
 
 <!-- code block -->
 ## Installation 
