@@ -24,7 +24,7 @@ What does the program do?
 
 		3. You can change the parameters in the `config.h` file  to your liking and see how the particle's behaviors changes
 		4. You can use your mouse to rotate around the projected visualization of the flocking sim.
-    In our original planning, we thought we'd be doing more graphics stuff but just rendering the particles as points colored by the magnitude of their velocity gets the point across.
+    In my original planning, I thought I'd be doing more graphics stuff but just rendering the particles as points colored by the magnitude of their velocity gets the point across:)
     NOTE: all the GPU rendering was done on a laptop with a GTX 1050ti, Ubuntu 22.05.5 LTS x86_64, and  Intel i7-8750H (12) @ 4.1GHz.
     
 ## Results
@@ -46,13 +46,13 @@ Almost all of this simulation can be parallelized, from computing distances betw
 
 Just by running this program, it's clear that using a GPU to accelerate the simulation is highly effective. 
 
-Are there things that could be improved? Yes. There's a lot of different collision algorithms that can be optimized for CUDA programming by implementing octrees and quadtrees.  Some other optimizations might be taking further advantage of CUDA's `thrust` library to get contiguous data accesses. Compute Shaders are also implemented in CUDA and can even further speed things up. That's after learning OpenGL/glsl which we had to do for this though which took up a big chunk of time anyway. 
+Are there things that could be improved? Yes. There's a lot of different collision algorithms that can be optimized for CUDA programming by implementing octrees and quadtrees.  Some other optimizations might be taking further advantage of CUDA's `thrust` library to get contiguous data accesses. Compute Shaders are also implemented in CUDA and can even further speed things up. That's after learning OpenGL/glsl which took up a huge amount of my time.
 
 In every case, the GPU implementation is better. Recording some fps we see
 
 Consider 100k boids with the default paramaters, we see that on the cpu it starts at a steady 5 frames per second![100k cpu fps](100k_cpufps.png) and for the cuda accelerated one: ![100k gpu fps](100k_gpu_fps.png), there's no delay, it's 60fps
 
-Furtheremore, we can see
+Furthermore, we can see
 
 
 For 1 million boids on the gpu:pictured here about 15 secs after starting, we see it's at a low fps, but still three times faster, around 15fps ![1 mil fps](1mil_gpu_fps.png)
