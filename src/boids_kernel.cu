@@ -7,6 +7,9 @@
 #include "boids_kernel.cuh"
 #include <random>
 #include <thrust/device_vector.h>
+#include <thrust/sort.h>
+#include <thrust/execution_policy.h>
+#include <thrust/device_ptr.h>
 
 #define gpuErrchk(ans)                        \
     {                                         \
@@ -86,89 +89,103 @@ namespace GPUSim
         gpuErrchk(cudaMalloc((void **)boidVelPing, numBoids * sizeof(glm::vec4)));
 
         gpuErrchk(cudaMalloc((void **)boidVelPong, numBoids * sizeof(glm::vec4)));
-        cudaPointerAttributes attributes;
-        cudaError_t err = cudaPointerGetAttributes(&attributes, boidVelPong);
 
         curandState *devStates;
 
-        gpuErrchk(cudaMalloc((void **)&devStates, numBoids * 2 * sizeof(curandState)));
+        gpuErrchk(cudaMalloc((void **)&devStates, numBoids * sizeof(curandState)));
 
-        initCurandStates<<<NUM_BLOCKS, NUM_THREADS>>>(devStates, 1234, numBoids);
+        dim3 numBlocks((numBoids + NUM_THREADS - 1) / NUM_THREADS);
+
+        initCurandStates<<<numBlocks, NUM_THREADS>>>(devStates, 1234, numBoids);
 
         gpuErrchk(cudaDeviceSynchronize());
 
-        initBoidsKernel<<<NUM_BLOCKS, NUM_THREADS>>>(*boidPositions, *boidVelPing, *boidVelPong, numBoids, devStates);
+        initBoidsKernel<<<numBlocks, NUM_THREADS>>>(*boidPositions, *boidVelPing, *boidVelPong, numBoids, devStates);
         gpuErrchk(cudaDeviceSynchronize());
+
+        // curand states are only needed for initialization
+        gpuErrchk(cudaFree(devStates));
     }
 
-    __device__ glm::vec4 changeVanillaVelocity(int numBoids, int i, glm::vec4 *pos, glm::vec4 *vel)
+    // Naive all-pairs velocity update, tiled through shared memory: each block
+    // streams the full boid set in NUM_THREADS-sized tiles so every position/
+    // velocity read from global memory is reused by all threads in the block.
+    __global__ void vanillaVelocityUpdate(glm::vec4 *boidPos, glm::vec4 *boidVelPing, glm::vec4 *boidVelPong, int numBoids)
     {
+        __shared__ glm::vec4 sharedPos[NUM_THREADS];
+        __shared__ glm::vec4 sharedVel[NUM_THREADS];
+
+        int index = threadIdx.x + blockIdx.x * blockDim.x;
+
+        // Cache this boid's own state in registers (0,0,0,0 for out-of-range
+        // threads, which still have to help load shared memory below).
+        glm::vec4 posI = (index < numBoids) ? boidPos[index] : glm::vec4(0.0f);
+        glm::vec4 velI = (index < numBoids) ? boidVelPing[index] : glm::vec4(0.0f);
+
         glm::vec4 cohesion(0.0f);
         glm::vec4 separation(0.0f);
         glm::vec4 alignment(0.0f);
-        glm::vec4 dV(0.0f);
-
         int cohesionNeighbors = 0;
         int alignmentNeighbors = 0;
 
-        for (int j = 0; j < numBoids; j++)
+        for (int tile = 0; tile < numBoids; tile += blockDim.x)
         {
-            if (i == j)
+            int j = tile + threadIdx.x;
+            if (j < numBoids)
             {
-                continue;
+                sharedPos[threadIdx.x] = boidPos[j];
+                sharedVel[threadIdx.x] = boidVelPing[j];
             }
+            __syncthreads();
 
-            float distance = glm::distance(pos[i], pos[j]);
-
-            // printf("Boid %d distance: %f\n", i, distance);
-
-            if (distance < COHERENCE_RADIUS)
+            int tileCount = min((int)blockDim.x, numBoids - tile);
+            for (int k = 0; k < tileCount; k++)
             {
-                cohesion += pos[j];
-                cohesionNeighbors++;
-            }
+                int jj = tile + k;
+                if (jj == index)
+                {
+                    continue;
+                }
 
-            if (distance < SEPARATION_RADIUS)
-            {
-                separation -= (pos[j] - pos[i]);
-            }
+                glm::vec4 diff = sharedPos[k] - posI;
+                float dist2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
 
-            if (distance < ALIGNMENT_RADIUS)
-            {
-                alignment += vel[j];
-                alignmentNeighbors++;
+                if (dist2 < COHERENCE_RADIUS * COHERENCE_RADIUS)
+                {
+                    cohesion += sharedPos[k];
+                    cohesionNeighbors++;
+                }
+                if (dist2 < SEPARATION_RADIUS * SEPARATION_RADIUS)
+                {
+                    separation -= diff;
+                }
+                if (dist2 < ALIGNMENT_RADIUS * ALIGNMENT_RADIUS)
+                {
+                    alignment += sharedVel[k];
+                    alignmentNeighbors++;
+                }
             }
+            __syncthreads();
+        }
+
+        if (index >= numBoids)
+        {
+            return;
         }
 
         if (cohesionNeighbors > 0)
         {
             cohesion /= (float)cohesionNeighbors;
-            cohesion = (cohesion - pos[i]) * COHESION_FACTOR;
+            cohesion = (cohesion - posI) * COHESION_FACTOR;
         }
         if (alignmentNeighbors > 0)
         {
             alignment /= (float)alignmentNeighbors;
             alignment *= ALIGNMENT_FACTOR;
         }
-
         separation *= SEPARATION_FACTOR;
 
-        dV = cohesion + separation + alignment;
-
-        return dV;
-    }
-
-    __global__ void vanillaVelocityUpdate(glm::vec4 *boidPos, glm::vec4 *boidVelPing, glm::vec4 *boidVelPong, int numBoids)
-    {
-        int index = threadIdx.x + blockIdx.x * blockDim.x;
-
-        if (index >= numBoids)
-        {
-            return;
-        }
-        // update velocity
-        glm::vec4 updated = boidVelPing[index] + changeVanillaVelocity(numBoids, index, boidPos, boidVelPing);
-
+        glm::vec4 updated = velI + cohesion + separation + alignment;
         limitVelocity(&updated);
         boidVelPong[index] = updated;
     }
@@ -200,11 +217,10 @@ namespace GPUSim
             boid->z = BOUND;
         }
     }
-    // kernel to update vanilla sim
+    // kernel to update position from the freshly computed velocity (pong)
     __global__ void vanillaPositionUpdate(int numBoids, float dt, glm::vec4 *boidPos, glm::vec4 *boidVelPing, glm::vec4 *boidVelPong)
     {
         int index = threadIdx.x + blockIdx.x * blockDim.x;
-        // printf("index, threadidx, blockidx: %d %d %d\n", index, threadIdx.x, blockIdx.x);
         if (index >= numBoids)
         {
             return;
@@ -267,43 +283,76 @@ namespace GPUSim
 
     void runVanillaSim(glm::vec4 *boidPositions, glm::vec4 **boidVelPing, glm::vec4 **boidVelPong, int numBoids, float dt, GLuint *bPosVBO, GLuint *bVelVBO)
     {
-        dim3 numBlocks((NUM_BOIDS + NUM_THREADS - 1) / NUM_THREADS);
+        dim3 numBlocks((numBoids + NUM_THREADS - 1) / NUM_THREADS);
 
-        vanillaVelocityUpdate<<<numBlocks, NUM_THREADS>>>(boidPositions, *boidVelPing, *boidVelPong, NUM_BOIDS);
-
+        // Kernels on the default stream run in order, so we only need one sync
+        // at the end (before the host maps the VBOs) instead of after each.
+        vanillaVelocityUpdate<<<numBlocks, NUM_THREADS>>>(boidPositions, *boidVelPing, *boidVelPong, numBoids);
         gpuErrchk(cudaGetLastError());
-
-        gpuErrchk(cudaDeviceSynchronize());
 
         vanillaPositionUpdate<<<numBlocks, NUM_THREADS>>>(numBoids, dt, boidPositions, *boidVelPing, *boidVelPong);
-
         gpuErrchk(cudaGetLastError());
 
         gpuErrchk(cudaDeviceSynchronize());
 
-        // swap the references
-        // ping pong ping
+        // ping-pong the velocity buffers
         glm::vec4 *temp = *boidVelPing;
         *boidVelPing = *boidVelPong;
         *boidVelPong = temp;
-
-        gpuErrchk(cudaDeviceSynchronize());
     }
 
-    // grid Sim accel.
+    // ---- grid-accelerated sim -------------------------------------------------
 
     const int CUBE_INT = GRID_SIZE * GRID_SIZE * GRID_SIZE;
 
+    // How many cells out to search per axis. A fixed +/-1 (3x3x3) is only
+    // enough when a cell is at least as wide as the largest neighbour radius;
+    // if the grid is refined so cells get smaller than the radius, a fixed
+    // search silently misses cross-cell neighbours. Derived from the config
+    // (computed in-kernel from the inlined constants) so it is always correct.
+    __device__ int cellSearchRadius()
+    {
+        float cellW = 2.0f * BOUND / GRID_SIZE;
+        float maxR = COHERENCE_RADIUS > ALIGNMENT_RADIUS ? COHERENCE_RADIUS : ALIGNMENT_RADIUS;
+        int r = (int)ceilf(maxR / cellW);
+        return r < 1 ? 1 : r;
+    }
+
+    // Persistent scratch buffers, allocated once in initGridBoids and reused
+    // every frame (the old code malloc/free'd these per frame).
+    namespace
+    {
+        int *dGridHash = nullptr;      // cell hash of each (sorted) boid
+        int *dBoidIndex = nullptr;     // sorted-slot -> original boid index
+        int *dCellStart = nullptr;     // first sorted slot in each cell
+        int *dCellEnd = nullptr;       // one-past last sorted slot in each cell
+        glm::vec4 *dSortedPos = nullptr;
+        glm::vec4 *dSortedVel = nullptr;
+    }
+
+    __device__ int cellCoord(float p)
+    {
+        int c = (int)((p + BOUND) / (2.0f * BOUND) * GRID_SIZE);
+        // wrap into [0, GRID_SIZE) (domain is toroidal, see dbound)
+        c %= GRID_SIZE;
+        if (c < 0)
+        {
+            c += GRID_SIZE;
+        }
+        return c;
+    }
+
     __device__ int getGridIndex(glm::vec4 pos)
     {
-        int x = (int)((pos.x + BOUND) / (2 * BOUND) * GRID_SIZE) % GRID_SIZE;
-        int y = (int)((pos.y + BOUND) / (2 * BOUND) * GRID_SIZE) % GRID_SIZE;
-        int z = (int)((pos.z + BOUND) / (2 * BOUND) * GRID_SIZE) % GRID_SIZE;
+        int x = cellCoord(pos.x);
+        int y = cellCoord(pos.y);
+        int z = cellCoord(pos.z);
 
         return x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE;
     }
 
-    __global__ void gridHashKernel(int numBoids, glm::vec4 *boidPos, int *gridHash)
+    // hash each boid to a cell and seed the identity permutation
+    __global__ void gridHashKernel(int numBoids, glm::vec4 *boidPos, int *gridHash, int *boidIndex)
     {
         int index = threadIdx.x + blockIdx.x * blockDim.x;
         if (index >= numBoids)
@@ -311,12 +360,13 @@ namespace GPUSim
             return;
         }
 
-        int gridIndex = getGridIndex(boidPos[index]);
-
-        gridHash[index] = gridIndex;
+        gridHash[index] = getGridIndex(boidPos[index]);
+        boidIndex[index] = index;
     }
 
-    __global__ void gridIndexKernel(int numBoids, int *gridHash, int *cellStart, int *cellEnd)
+    // gather positions/velocities into cell-sorted order using the permutation
+    // produced by sort_by_key
+    __global__ void reorderKernel(int numBoids, int *boidIndex, glm::vec4 *pos, glm::vec4 *vel, glm::vec4 *sortedPos, glm::vec4 *sortedVel)
     {
         int index = threadIdx.x + blockIdx.x * blockDim.x;
         if (index >= numBoids)
@@ -324,182 +374,204 @@ namespace GPUSim
             return;
         }
 
-        int hash = gridHash[index];
+        int src = boidIndex[index];
+        sortedPos[index] = pos[src];
+        sortedVel[index] = vel[src];
+    }
 
-        if (index == 0 || hash != gridHash[index - 1])
+    // find the [start, end) slot range of each cell within the sorted hash array
+    __global__ void cellStartEndKernel(int numBoids, int *sortedHash, int *cellStart, int *cellEnd)
+    {
+        int index = threadIdx.x + blockIdx.x * blockDim.x;
+        if (index >= numBoids)
+        {
+            return;
+        }
+
+        int hash = sortedHash[index];
+
+        if (index == 0 || hash != sortedHash[index - 1])
         {
             cellStart[hash] = index;
         }
-        if (index == numBoids - 1 || hash != gridHash[index + 1])
+        if (index == numBoids - 1 || hash != sortedHash[index + 1])
         {
-            cellEnd[hash] = index;
+            cellEnd[hash] = index + 1;
         }
     }
 
-    __device__ glm::vec4 changeGridVelocity(int numBoids, int i, glm::vec4 *pos, glm::vec4 *vel, int *gridHash, int *cellStart, int *cellEnd)
+    // velocity update over the 3x3x3 neighbourhood of cells, reading cell-sorted
+    // arrays; writes the result back into the original boid ordering.
+    __global__ void gridVelocityUpdate(int numBoids, int *boidIndex, int *cellStart, int *cellEnd,
+                                       glm::vec4 *sortedPos, glm::vec4 *sortedVel, glm::vec4 *boidVelPong)
     {
+        int index = threadIdx.x + blockIdx.x * blockDim.x;
+        if (index >= numBoids)
+        {
+            return;
+        }
+
+        glm::vec4 posI = sortedPos[index];
+        glm::vec4 velI = sortedVel[index];
+
+        int cx = cellCoord(posI.x);
+        int cy = cellCoord(posI.y);
+        int cz = cellCoord(posI.z);
+
         glm::vec4 cohesion(0.0f);
         glm::vec4 separation(0.0f);
         glm::vec4 alignment(0.0f);
-        glm::vec4 dV(0.0f);
-
         int cohesionNeighbors = 0;
         int alignmentNeighbors = 0;
 
-        int gridIndex = gridHash[i];
-
-        for (int j = cellStart[gridIndex]; j <= cellEnd[gridIndex]; j++)
+        // Visit `searchR` cells out in each direction. When the search span
+        // reaches the whole grid we walk every cell exactly once (absolute
+        // coords) so wrap-around can't double-count a cell; otherwise the
+        // wrapped window is already distinct.
+        const int searchR = cellSearchRadius();
+        const int span = 2 * searchR + 1;
+        const int axisCount = span < GRID_SIZE ? span : GRID_SIZE;
+        for (int iz = 0; iz < axisCount; iz++)
         {
-            if (i == j)
+            for (int iy = 0; iy < axisCount; iy++)
             {
-                continue;
-            }
+                for (int ix = 0; ix < axisCount; ix++)
+                {
+                    int nx = (span < GRID_SIZE) ? ((cx - searchR + ix) % GRID_SIZE + GRID_SIZE) % GRID_SIZE : ix;
+                    int ny = (span < GRID_SIZE) ? ((cy - searchR + iy) % GRID_SIZE + GRID_SIZE) % GRID_SIZE : iy;
+                    int nz = (span < GRID_SIZE) ? ((cz - searchR + iz) % GRID_SIZE + GRID_SIZE) % GRID_SIZE : iz;
 
-            float distance = glm::distance(pos[i], pos[j]);
+                    int cell = nx + ny * GRID_SIZE + nz * GRID_SIZE * GRID_SIZE;
 
-            if (distance < COHERENCE_RADIUS)
-            {
-                cohesion += pos[j];
-                cohesionNeighbors++;
-            }
+                    int start = cellStart[cell];
+                    if (start < 0)
+                    {
+                        continue; // empty cell
+                    }
+                    int end = cellEnd[cell];
 
-            if (distance < SEPARATION_RADIUS)
-            {
-                separation -= (pos[j] - pos[i]);
-            }
+                    for (int j = start; j < end; j++)
+                    {
+                        if (j == index)
+                        {
+                            continue;
+                        }
 
-            if (distance < ALIGNMENT_RADIUS)
-            {
-                alignment += vel[j];
-                alignmentNeighbors++;
+                        glm::vec4 diff = sortedPos[j] - posI;
+                        float dist2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+
+                        if (dist2 < COHERENCE_RADIUS * COHERENCE_RADIUS)
+                        {
+                            cohesion += sortedPos[j];
+                            cohesionNeighbors++;
+                        }
+                        if (dist2 < SEPARATION_RADIUS * SEPARATION_RADIUS)
+                        {
+                            separation -= diff;
+                        }
+                        if (dist2 < ALIGNMENT_RADIUS * ALIGNMENT_RADIUS)
+                        {
+                            alignment += sortedVel[j];
+                            alignmentNeighbors++;
+                        }
+                    }
+                }
             }
         }
 
         if (cohesionNeighbors > 0)
         {
             cohesion /= (float)cohesionNeighbors;
-            cohesion = (cohesion - pos[i]) * COHESION_FACTOR;
+            cohesion = (cohesion - posI) * COHESION_FACTOR;
         }
         if (alignmentNeighbors > 0)
         {
             alignment /= (float)alignmentNeighbors;
             alignment *= ALIGNMENT_FACTOR;
         }
-
         separation *= SEPARATION_FACTOR;
 
-        dV = cohesion + separation + alignment;
-
-        return dV;
-    }
-
-    __global__ void gridVelocityUpdate(int numBoids, glm::vec4 *boidPos, glm::vec4 *boidVelPing, glm::vec4 *boidVelPong, int *gridHash, int *cellStart, int *cellEnd)
-    {
-        int index = threadIdx.x + blockIdx.x * blockDim.x;
-
-        if (index >= numBoids)
-        {
-            return;
-        }
-        glm::vec4 updated = boidVelPing[index] + changeGridVelocity(numBoids, index, boidPos, boidVelPing, gridHash, cellStart, cellEnd);
-
+        glm::vec4 updated = velI + cohesion + separation + alignment;
         limitVelocity(&updated);
 
-        boidVelPong[index] = updated;
-    }
-
-    __global__ void gridPositionUpdate(int numBoids, float dt, glm::vec4 *boidPos, glm::vec4 *boidVelPing, glm::vec4 *boidVelPong)
-    {
-        int index = threadIdx.x + blockIdx.x * blockDim.x;
-        // printf("index, threadidx, blockidx: %d %d %d\n", index, threadIdx.x, blockIdx.x);
-        if (index >= numBoids)
-        {
-            return;
-        }
-        glm::vec4 pos = boidPos[index];
-
-        pos += boidVelPong[index] * dt;
-
-        dbound(&pos);
-
-        boidPos[index] = pos;
+        // scatter back to the original ordering so position update / ping-pong
+        // / VBO copy all stay index-consistent
+        boidVelPong[boidIndex[index]] = updated;
     }
 
     void initGridBoids(glm::vec4 **boidPositions, glm::vec4 **boidVelPing, glm::vec4 **boidVelPong, int numBoids)
     {
         gpuErrchk(cudaMalloc((void **)boidPositions, numBoids * sizeof(glm::vec4)));
-
         gpuErrchk(cudaMalloc((void **)boidVelPing, numBoids * sizeof(glm::vec4)));
-
         gpuErrchk(cudaMalloc((void **)boidVelPong, numBoids * sizeof(glm::vec4)));
-        cudaPointerAttributes attributes;
-        cudaError_t err = cudaPointerGetAttributes(&attributes, boidVelPong);
+
+        // persistent grid scratch (reused every frame)
+        gpuErrchk(cudaMalloc((void **)&dGridHash, numBoids * sizeof(int)));
+        gpuErrchk(cudaMalloc((void **)&dBoidIndex, numBoids * sizeof(int)));
+        gpuErrchk(cudaMalloc((void **)&dCellStart, CUBE_INT * sizeof(int)));
+        gpuErrchk(cudaMalloc((void **)&dCellEnd, CUBE_INT * sizeof(int)));
+        gpuErrchk(cudaMalloc((void **)&dSortedPos, numBoids * sizeof(glm::vec4)));
+        gpuErrchk(cudaMalloc((void **)&dSortedVel, numBoids * sizeof(glm::vec4)));
 
         curandState *devStates;
+        gpuErrchk(cudaMalloc((void **)&devStates, numBoids * sizeof(curandState)));
 
-        gpuErrchk(cudaMalloc((void **)&devStates, numBoids * 2 * sizeof(curandState)));
+        dim3 numBlocks((numBoids + NUM_THREADS - 1) / NUM_THREADS);
 
-        initCurandStates<<<NUM_BLOCKS, NUM_THREADS>>>(devStates, 1337, numBoids);
-
+        initCurandStates<<<numBlocks, NUM_THREADS>>>(devStates, 1337, numBoids);
         gpuErrchk(cudaDeviceSynchronize());
 
-        initBoidsKernel<<<NUM_BLOCKS, NUM_THREADS>>>(*boidPositions, *boidVelPing, *boidVelPong, numBoids, devStates);
+        initBoidsKernel<<<numBlocks, NUM_THREADS>>>(*boidPositions, *boidVelPing, *boidVelPong, numBoids, devStates);
         gpuErrchk(cudaDeviceSynchronize());
+
+        gpuErrchk(cudaFree(devStates));
+    }
+
+    void freeGridBoids()
+    {
+        cudaFree(dGridHash);
+        cudaFree(dBoidIndex);
+        cudaFree(dCellStart);
+        cudaFree(dCellEnd);
+        cudaFree(dSortedPos);
+        cudaFree(dSortedVel);
     }
 
     void runGridSim(glm::vec4 *boidPositions, glm::vec4 **boidVelPing, glm::vec4 **boidVelPong, int numBoids, float dt, GLuint *bPosVBO, GLuint *bVelVBO)
     {
-        dim3 numBlocks((NUM_BOIDS + NUM_THREADS - 1) / NUM_THREADS);
+        dim3 numBlocks((numBoids + NUM_THREADS - 1) / NUM_THREADS);
 
-        int *gridHash;
-        int *cellStart;
-        int *cellEnd;
-
-        gpuErrchk(cudaMalloc((void **)&gridHash, numBoids * sizeof(int)));
-        gpuErrchk(cudaMalloc((void **)&cellStart, CUBE_INT * sizeof(int)));
-        gpuErrchk(cudaMalloc((void **)&cellEnd, CUBE_INT * sizeof(int)));
-
-        gridHashKernel<<<numBlocks, NUM_THREADS>>>(numBoids, boidPositions, gridHash);
-
+        // 1. hash every boid to a cell + seed the identity permutation
+        gridHashKernel<<<numBlocks, NUM_THREADS>>>(numBoids, boidPositions, dGridHash, dBoidIndex);
         gpuErrchk(cudaGetLastError());
 
-        gpuErrchk(cudaDeviceSynchronize());
+        // 2. sort boid indices by cell hash so each cell's members are contiguous
+        thrust::sort_by_key(thrust::device,
+                            thrust::device_pointer_cast(dGridHash),
+                            thrust::device_pointer_cast(dGridHash + numBoids),
+                            thrust::device_pointer_cast(dBoidIndex));
 
-        thrust::device_vector<int> thrustGridHash(gridHash, gridHash + numBoids);
-        thrust::device_vector<int> thrustCellStart(CUBE_INT, -1);
-        thrust::device_vector<int> thrustCellEnd(CUBE_INT, -1);
-
+        // 3. gather positions/velocities into cell-sorted order
+        reorderKernel<<<numBlocks, NUM_THREADS>>>(numBoids, dBoidIndex, boidPositions, *boidVelPing, dSortedPos, dSortedVel);
         gpuErrchk(cudaGetLastError());
 
-        thrust::fill(thrustCellStart.begin(), thrustCellStart.end(), -1);
-        thrust::fill(thrustCellEnd.begin(), thrustCellEnd.end(), -1);
-
-        thrust::device_vector<int> thrustCellStartD = thrustCellStart;
-        thrust::device_vector<int> thrustCellEndD = thrustCellEnd;
-
-        gridIndexKernel<<<numBlocks, NUM_THREADS>>>(numBoids, gridHash, thrust::raw_pointer_cast(thrustCellStartD.data()), thrust::raw_pointer_cast(thrustCellEndD.data()));
-
+        // 4. compute per-cell [start, end) ranges (empty cells stay -1)
+        gpuErrchk(cudaMemset(dCellStart, 0xff, CUBE_INT * sizeof(int)));
+        cellStartEndKernel<<<numBlocks, NUM_THREADS>>>(numBoids, dGridHash, dCellStart, dCellEnd);
         gpuErrchk(cudaGetLastError());
 
-        gpuErrchk(cudaDeviceSynchronize());
+        // 5. flocking over the 3x3x3 cell neighbourhood
+        gridVelocityUpdate<<<numBlocks, NUM_THREADS>>>(numBoids, dBoidIndex, dCellStart, dCellEnd, dSortedPos, dSortedVel, *boidVelPong);
+        gpuErrchk(cudaGetLastError());
 
-        thrust::copy(thrustCellStartD.begin(), thrustCellStartD.end(), thrustCellStart.begin());
-        thrust::copy(thrustCellEndD.begin(), thrustCellEndD.end(), thrustCellEnd.begin());
-
-        gridVelocityUpdate<<<numBlocks, NUM_THREADS>>>(numBoids, boidPositions, *boidVelPing, *boidVelPong, thrust::raw_pointer_cast(thrustGridHash.data()), thrust::raw_pointer_cast(thrustCellStart.data()), thrust::raw_pointer_cast(thrustCellEnd.data()));
-
-        gpuErrchk(cudaDeviceSynchronize());
-
+        // 6. integrate positions from the new velocities (original ordering)
         vanillaPositionUpdate<<<numBlocks, NUM_THREADS>>>(numBoids, dt, boidPositions, *boidVelPing, *boidVelPong);
+        gpuErrchk(cudaGetLastError());
 
         gpuErrchk(cudaDeviceSynchronize());
 
         glm::vec4 *temp = *boidVelPing;
         *boidVelPing = *boidVelPong;
         *boidVelPong = temp;
-
-        gpuErrchk(cudaFree(gridHash));
-        gpuErrchk(cudaFree(cellStart));
-        gpuErrchk(cudaFree(cellEnd));
     }
 }
