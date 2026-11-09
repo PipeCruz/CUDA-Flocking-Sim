@@ -21,6 +21,11 @@ namespace CPUSim
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_real_distribution<> dis(-BOUND, BOUND);
+        // Velocities must start near unit speed, not spanning the whole domain:
+        // a +/-BOUND initial velocity dwarfs the steering forces, so limit()
+        // only clamps the speed while keeping each boid's random heading and
+        // the flock never forms. Matches the GPU init (randVec4 in [-1, 1]).
+        std::uniform_real_distribution<> velDis(-1.0, 1.0);
 
         boids->boidPositions.resize(numBoids);
         boids->boidVelocities.resize(numBoids);
@@ -29,8 +34,7 @@ namespace CPUSim
         {
             boids->boidPositions[i] = glm::vec4(dis(gen), dis(gen), dis(gen), 1.0f);
 
-            // velocities between 0 and 1
-            boids->boidVelocities[i] = glm::vec4(dis(gen), dis(gen), dis(gen), 0.0f);
+            boids->boidVelocities[i] = glm::vec4(velDis(gen), velDis(gen), velDis(gen), 0.0f);
         }
     }
     glm::vec3 limit(const glm::vec3 &vec, float max)
